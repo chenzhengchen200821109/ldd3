@@ -15,11 +15,9 @@
  * $Id: jiq.c,v 1.7 2004/09/26 07:02:43 gregkh Exp $
  */
  
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>     /* everything... */
@@ -28,6 +26,8 @@
 #include <linux/workqueue.h>
 #include <linux/preempt.h>
 #include <linux/interrupt.h> /* tasklets */
+#include <linux/slab.h>
+#include <linux/wait.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -42,7 +42,6 @@ module_param(delay, long, 0);
  * This module is a silly one: it only embeds short code fragments
  * that show how enqueued tasks `feel' the environment
  */
-
 #define LIMIT	(PAGE_SIZE-128)	/* don't print any more after this size */
 
 /*
@@ -54,6 +53,7 @@ static DECLARE_WAIT_QUEUE_HEAD (jiq_wait);
 
 /* 共享队列 */
 static struct work_struct jiq_work;
+static struct delayed_work jiq_delay_work;
 
 /*
  * Keep track of info we need between task queue runs.
@@ -71,31 +71,7 @@ static struct clientdata {
 static void jiq_print_tasklet(unsigned long);
 static DECLARE_TASKLET(jiq_tasklet, jiq_print_tasklet, (unsigned long)&jiq_data);
 
-struct file_operations proc_jiq_wq = 
-{
-	.owner = THIS_MODULE,
-	.read = jiq_read_wq,
-	.open = jiq_open_wq,
-	.release = jiq_release_wq,
-};
 
-struct file_operations proc_jiq_wq_delay =
-{
-	.owner = THIS_MODULE,
-	.read = jiq_read_wq_delayed,
-};
-
-struct file_operations proc_jiq_tasklet = 
-{
-	.owner = THIS_MODULE,
-	.read = jiq_read_tasklet,
-};
-
-struct file_operations proc_jiq_timeout =
-{
-	.owner = THIS_MODULE,
-	.read = jiq_read_run_timer,
-};
 
 /*
  * struct file_operations {
@@ -171,7 +147,7 @@ static int jiq_print(void *ptr) // ptr指向struct clientdata结构
 /*
  * Call jiq_print from a work queue
  */
-static void jiq_print_wq(void *ptr)
+static void jiq_print_wq(struct work_struct *ptr)
 {
 	struct clientdata *data = (struct clientdata *) ptr;
     
@@ -184,7 +160,7 @@ static void jiq_print_wq(void *ptr)
 		 *                            unsigned long delay)
 		 * -- put work task in gloabl workqueue after delay
 		 */
-		schedule_delayed_work(&jiq_work, data->delay);
+		schedule_delayed_work(&jiq_delay_work, data->delay);
 	else
 		/*
 		 * bool schedule_work(struct work_struct *work)
@@ -197,7 +173,7 @@ static int jiq_open_wq(struct inode *pinode, struct file *pfile)
 {
 	char* p;
 	if ((p = kmalloc(LIMIT, GFP_KERNEL)) == NULL)
-		return -1
+		return -1;
 	jiq_data.kbuf = p;
 	return 0;
 }
@@ -232,8 +208,6 @@ static ssize_t jiq_read_wq(struct file *pfile, char __user *buf, size_t len, lof
 	return jiq_data.len;
 }
 
-static 
-
 static ssize_t jiq_read_wq_delayed(struct file *pfile, char __user *buf, size_t len, loff_t *poff)
 {
 	// 定义一个wait事件
@@ -245,7 +219,7 @@ static ssize_t jiq_read_wq_delayed(struct file *pfile, char __user *buf, size_t 
 	jiq_data.delay = delay;
     
 	prepare_to_wait(&jiq_wait, &wait, TASK_INTERRUPTIBLE);
-	schedule_delayed_work(&jiq_work, delay);
+	schedule_delayed_work(&jiq_delay_work, delay);
 	schedule();
 	finish_wait(&jiq_wait, &wait);
 
@@ -263,12 +237,17 @@ static void jiq_print_tasklet(unsigned long ptr)
 
 static ssize_t jiq_read_tasklet(struct file *pfile, char __user *buf, size_t len, loff_t *poff)
 {
+    DEFINE_WAIT(wait);
+
 	jiq_data.len = 0;                /* nothing printed, yet */
-	jiq_data.buf = buf;              /* print in this place */
+	jiq_data.ubuf = buf;              /* print in this place */
 	jiq_data.jiffies = jiffies;      /* initial time */
 
 	tasklet_schedule(&jiq_tasklet);
-	interruptible_sleep_on(&jiq_wait);    /* sleep till completion */
+	//interruptible_sleep_on(&jiq_wait);    /* interruptible_sleep_on() is deprecated in Linux Kernel 3.16 */
+    prepare_to_wait(&jiq_wait, &wait, TASK_INTERRUPTIBLE);
+    schedule();
+    finish_wait(&jiq_wait, &wait);
 
 	return jiq_data.len;
 }
@@ -289,7 +268,7 @@ static ssize_t jiq_read_run_timer(struct file *pfile, char __user *buf, size_t l
 {
 
 	jiq_data.len = 0;           /* prepare the argument for jiq_print() */
-	jiq_data.buf = buf;
+	jiq_data.ubuf = buf;
 	jiq_data.jiffies = jiffies;
 
 	init_timer(&jiq_timer);              /* init the timer structure */
@@ -299,11 +278,37 @@ static ssize_t jiq_read_run_timer(struct file *pfile, char __user *buf, size_t l
 
 	jiq_print(&jiq_data);   /* print and go to sleep */
 	add_timer(&jiq_timer);
-	interruptible_sleep_on(&jiq_wait);  /* RACE */
+	//interruptible_sleep_on(&jiq_wait);  /* RACE -- interruptible_sleep_on() is deprecated in Linux Kernel 3.16 */
 	del_timer_sync(&jiq_timer);  /* in case a signal woke us up */
     
 	return jiq_data.len;
 }
+
+struct file_operations proc_jiq_wq = 
+{
+	.owner = THIS_MODULE,
+	.read = jiq_read_wq,
+	.open = jiq_open_wq,
+	.release = jiq_release_wq,
+};
+
+struct file_operations proc_jiq_wq_delay =
+{
+	.owner = THIS_MODULE,
+	.read = jiq_read_wq_delayed,
+};
+
+struct file_operations proc_jiq_tasklet = 
+{
+	.owner = THIS_MODULE,
+	.read = jiq_read_tasklet,
+};
+
+struct file_operations proc_jiq_timeout =
+{
+	.owner = THIS_MODULE,
+	.read = jiq_read_run_timer,
+};
 
 /*
  * the init/clean material
@@ -313,7 +318,8 @@ static int jiq_init(void)
 {
 
 	/* 初始化一个任务 */
-	INIT_WORK(&jiq_work, jiq_print_wq, &jiq_data);
+	INIT_WORK(&jiq_work, jiq_print_wq);
+    INIT_DELAYED_WORK(&jiq_delay_work, jiq_print_wq);
 
 	/*
 	 * struct proc_dir_entry *proc_create(const char *name, umode_t mode, 
@@ -323,6 +329,9 @@ static int jiq_init(void)
 	proc_create("jiqwqdelay", 0, NULL, &proc_jiq_wq_delay);
 	proc_create("jiqtimer", 0, NULL, &proc_jiq_timeout);
 	proc_create("jiqtasklet", 0, NULL, &proc_jiq_tasklet);
+    /*
+     * create_proc_read_entry() is deprecated
+     */
 	//create_proc_read_entry("jiqwq", 0, NULL, jiq_read_wq, NULL);
 	//create_proc_read_entry("jiqwqdelay", 0, NULL, jiq_read_wq_delayed, NULL);
 	//create_proc_read_entry("jitimer", 0, NULL, jiq_read_run_timer, NULL);
