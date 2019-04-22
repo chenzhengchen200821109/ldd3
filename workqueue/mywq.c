@@ -28,6 +28,7 @@ static void workqueue_fn(struct work_struct *work)
     printk(KERN_ALERT "workqueue_fn is executing\n");
     len = strlen(message);
     strcpy(message + len, "workqueue_fn has been called\n");
+	// 唤醒休眠的线程
     wake_up_interruptible(&mywait);
 }
 
@@ -57,10 +58,13 @@ ssize_t hello_proc_read(struct file *pfile, char __user *buf, size_t size, loff_
         return 0;
     }
 
+	// 自我休眠，等待其他线程将我唤醒
     prepare_to_wait(&mywait, &wait, TASK_INTERRUPTIBLE);
     schedule_work(&wq);
     schedule();
     finish_wait(&mywait, &wait);
+
+	// 被其他线程唤醒，开始执行余下代码
     len = strlen(message);
     copy_to_user(buf, message, len);
     pread = 0; /* end loops by set flag pread */
