@@ -15,7 +15,6 @@
  * $Id: jit.c,v 1.16 2004/09/26 07:02:43 gregkh Exp $
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -27,6 +26,7 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <asm/hardirq.h>
+#include <linux/wait.h>
 /*
  * This module is a silly one: it only embeds short code fragments
  * that show how time delays can be handled in the kernel.
@@ -51,8 +51,7 @@ enum jit_files {
  * This function prints one line of data, after sleeping one second.
  * It can sleep in different ways, according to the data pointer
  */
-int jit_fn(char *buf, char **start, off_t offset,
-	      int len, int *eof, void *data)
+ssize_t jit_fn(struct file *pfile, char __user *buf, size_t size, loff_t *offset)
 {
 	unsigned long j0, j1; /* jiffies */
 	wait_queue_head_t wait;
@@ -61,6 +60,7 @@ int jit_fn(char *buf, char **start, off_t offset,
 	j0 = jiffies;
 	j1 = j0 + delay;
 
+    // data
 	switch((long)data) {
 		case JIT_BUSY:
 			while (time_before(jiffies, j1))
@@ -89,8 +89,7 @@ int jit_fn(char *buf, char **start, off_t offset,
 /*
  * This file, on the other hand, returns the current time forever
  */
-int jit_currentime(char *buf, char **start, off_t offset,
-                   int len, int *eof, void *data)
+ssize_t jit_currentime(struct file *pfile, char __user *buf, size_t size, loff_t *offset)
 {
 	struct timeval tv1;
 	struct timespec tv2;
@@ -151,8 +150,7 @@ void jit_timer_fn(unsigned long arg)
 }
 
 /* the /proc function: allocate everything to allow concurrency */
-int jit_timer(char *buf, char **start, off_t offset,
-	      int len, int *eof, void *unused_data)
+ssize_t jit_timer(struct file *pfile, char __user *buf, size_t size, loff_t *offset)
 {
 	struct jit_data *data;
 	char *buf2 = buf;
@@ -188,7 +186,7 @@ int jit_timer(char *buf, char **start, off_t offset,
 		return -ERESTARTSYS;
 	buf2 = data->buf;
 	kfree(data);
-	*eof = 1;
+	
 	return buf2 - buf;
 }
 
@@ -212,8 +210,7 @@ void jit_tasklet_fn(unsigned long arg)
 }
 
 /* the /proc function: allocate everything to allow concurrency */
-int jit_tasklet(char *buf, char **start, off_t offset,
-	      int len, int *eof, void *arg)
+ssize_t jit_tasklet(struct file *pfile, char __user *buf, size_t size, loff_t *offset)
 {
 	struct jit_data *data;
 	char *buf2 = buf;
@@ -252,23 +249,62 @@ int jit_tasklet(char *buf, char **start, off_t offset,
 		return -ERESTARTSYS;
 	buf2 = data->buf;
 	kfree(data);
-	*eof = 1;
+	
 	return buf2 - buf;
 }
 
+struct file_operations curr_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_currentime,
+};
 
+struct file_operations jitbusy_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_fn,
+};
+
+struct file_operations jitsched_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_fn,
+};
+
+struct file_operations jitqueue_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_fn,
+};
+
+struct file_operations jitschedto_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_fn, 
+};
+
+struct file_operations jitimer_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_timer,
+};
+
+struct file_operations jitasklet_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_tasklet,
+};
+
+struct file_operations jitasklethi_fops = {
+    .owner = THIS_MODULE,
+    .read = jit_tasklet,
+};
 
 int __init jit_init(void)
 {
-	create_proc_read_entry("currentime", 0, NULL, jit_currentime, NULL);
-	create_proc_read_entry("jitbusy", 0, NULL, jit_fn, (void *)JIT_BUSY);
-	create_proc_read_entry("jitsched",0, NULL, jit_fn, (void *)JIT_SCHED);
-	create_proc_read_entry("jitqueue",0, NULL, jit_fn, (void *)JIT_QUEUE);
-	create_proc_read_entry("jitschedto", 0, NULL, jit_fn, (void *)JIT_SCHEDTO);
+    printk(KERN_ALERT "called jit_init\n");
+	create_proc_read_entry("currentime", 0, NULL, &curr_fops);
+	create_proc_read_entry("jitbusy", 0, NULL, &jitbusy_fops);
+	create_proc_read_entry("jitsched",0, NULL, &jitsched_fops);
+	create_proc_read_entry("jitqueue",0, NULL, &jitqueue_fops);
+	create_proc_read_entry("jitschedto", 0, NULL, &jitschedto_fops);
 
-	create_proc_read_entry("jitimer", 0, NULL, jit_timer, NULL);
-	create_proc_read_entry("jitasklet", 0, NULL, jit_tasklet, NULL);
-	create_proc_read_entry("jitasklethi", 0, NULL, jit_tasklet, (void *)1);
+	create_proc_read_entry("jitimer", 0, NULL, &jitimer_fops);
+	create_proc_read_entry("jitasklet", 0, NULL, &jitasklet_fops);
+	create_proc_read_entry("jitasklethi", 0, NULL, &jitasklethi_fops);
 
 	return 0; /* success */
 }
@@ -280,10 +316,10 @@ void __exit jit_cleanup(void)
 	remove_proc_entry("jitsched", NULL);
 	remove_proc_entry("jitqueue", NULL);
 	remove_proc_entry("jitschedto", NULL);
-
 	remove_proc_entry("jitimer", NULL);
 	remove_proc_entry("jitasklet", NULL);
 	remove_proc_entry("jitasklethi", NULL);
+    printk(KERN_ALERT "called jit_cleanup\n");
 }
 
 module_init(jit_init);
