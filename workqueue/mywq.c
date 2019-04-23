@@ -12,7 +12,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("chenzheng");
 MODULE_DESCRIPTION("Simple module featuring proc read and workqueue");
 
-#define BUFLEN 64
+#define BUFLEN 128
 
 static struct work_struct wq; // a work
 static DECLARE_WAIT_QUEUE_HEAD (mywait);
@@ -21,13 +21,18 @@ static struct file_operations fops;
 
 static char *message;
 static int pread;
+static unsigned long jiffies_save; // saved jiffies value
 
 static void workqueue_fn(struct work_struct *work)
 {
     size_t len;
+    unsigned long j = jiffies;
     printk(KERN_ALERT "workqueue_fn is executing\n");
-    len = strlen(message);
-    strcpy(message + len, "workqueue_fn has been called\n");
+    //len = strlen(message);
+    //strcpy(message + len, "workqueue_fn has been called\n");
+    len = sprintf(message, "    time  delta preempt  pid cpu commd\n");
+    sprintf(message + len, "%9li  %4li    %3i %5i %3i %s\n",
+            j, j - jiffies_save, preempt_count(), current->pid, smp_processor_id(), current->comm);
 	// 唤醒休眠的线程
     wake_up_interruptible(&mywait);
 }
@@ -42,7 +47,7 @@ int hello_proc_open(struct inode *pinode, struct file *pfile)
         printk(KERN_ALERT "hello_proc_open failed\n");
         return -ENOMEM;
     }
-    strcpy(message, "Hello World\n");
+    //strcpy(message, "Hello World\n");
     return 0;
 }
 
@@ -51,6 +56,7 @@ ssize_t hello_proc_read(struct file *pfile, char __user *buf, size_t size, loff_
     size_t len;
     DEFINE_WAIT(wait);
 
+    jiffies_save = jiffies;
     printk(KERN_ALERT "proc called read\n");
     /* read loops until you return 0 */
     if (!pread) {
