@@ -28,6 +28,7 @@
 #include <linux/interrupt.h> /* tasklets */
 #include <linux/slab.h>
 #include <linux/wait.h>
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("Dual BSD/GPL");
 
@@ -42,7 +43,7 @@ module_param(delay, long, 0);
  * This module is a silly one: it only embeds short code fragments
  * that show how enqueued tasks `feel' the environment
  */
-#define LIMIT	(PAGE_SIZE-128)	/* don't print any more after this size */
+#define BUFLEN	(64)	/* don't print any more after this size */
 
 /*
  * Print information about the current environment. This is called from
@@ -60,8 +61,7 @@ static struct delayed_work jiq_delay_work;
  */
 static struct clientdata {
 	int len;
-	char *kbuf;
-	char *ubuf;
+	char *buf;
 	unsigned long jiffies;
 	long delay;
 } jiq_data;
@@ -70,7 +70,6 @@ static struct clientdata {
 
 static void jiq_print_tasklet(unsigned long);
 static DECLARE_TASKLET(jiq_tasklet, jiq_print_tasklet, (unsigned long)&jiq_data);
-
 
 
 /*
@@ -115,30 +114,28 @@ static int jiq_print(void *ptr) // ptr指向struct clientdata结构
 {
 	struct clientdata *data = ptr;
 	int len = data->len;
-	char *kbuf = data->kbuf;
-	char *ubuf = data->ubuf;
+	char *buf = data->buf;
 	unsigned long j = jiffies;
 
-	if (len > LIMIT) { 
+	if (len > BUFLEN) { 
 		wake_up_interruptible(&jiq_wait); /* awake the process */
 		return 0;
 	}
 
-	if (len == 0)
-		len = sprintf(kbuf,"    time  delta preempt   pid cpu command\n");
-	else
-		len = 0;
+	if (len == 0) {
+		len = sprintf(buf,"    time  delta preempt   pid cpu command\n");
+    }
+	//else
+    //		len = 0;
 
   	/* intr_count is only exported since 1.3.5, but 1.99.4 is needed anyways */
-	len += sprintf(kbuf+len, "%9li  %4li     %3i %5i %3i %s\n",
+	len += sprintf(buf+len, "%9li  %4li     %3i %5i %3i %s\n",
 			j, j - data->jiffies,
 			preempt_count(), current->pid, smp_processor_id(),
 			current->comm);
-	// copy_to_user()函数
-	copy_to_user(ubuf, kbuf, len);
 
 	data->len += len;
-	data->kbuf += len;
+	data->buf += len;
 	data->jiffies = j;
 	return 1;
 }
@@ -149,9 +146,11 @@ static int jiq_print(void *ptr) // ptr指向struct clientdata结构
  */
 static void jiq_print_wq(struct work_struct *ptr)
 {
-	struct clientdata *data = (struct clientdata *) ptr;
+	//struct clientdata *data = (struct clientdata *) ptr;
+    struct clientdata *data = &jiq_data;
     
-	if (! jiq_print (ptr)) // 唤醒
+	//if (! jiq_print (ptr)) // 唤醒
+    if (!jiq_print(data))
 		return;
     
 	if (data->delay)
@@ -172,28 +171,33 @@ static void jiq_print_wq(struct work_struct *ptr)
 static int jiq_open_wq(struct inode *pinode, struct file *pfile)
 {
 	char* p;
-	if ((p = kmalloc(LIMIT, GFP_KERNEL)) == NULL)
+	if ((p = kmalloc(BUFLEN, GFP_KERNEL)) == NULL)
 		return -1;
-	jiq_data.kbuf = p;
+	jiq_data.buf = p;
 	return 0;
 }
 
 static int jiq_release_wq(struct inode *pinode, struct file *pfile)
 {
-	char *p = jiq_data.kbuf;
-	if (p)
+	char *p = jiq_data.buf;
+	if (p) {
 		kfree(p);
+        p = 0;
+    }
 	return 0;
 }
 
 
-/* ssize_t (*read) (struct file *, char __user *, size_t, loff_t *); */
+/* 
+ * ssize_t (*read) (struct file *, char __user *, size_t, loff_t *); 
+ *     ---- end read loops when return 0
+ */
 static ssize_t jiq_read_wq(struct file *pfile, char __user *buf, size_t len, loff_t *poff)
 {
 	DEFINE_WAIT(wait);
 	
 	jiq_data.len = 0;                /* nothing printed, yet */
-	jiq_data.ubuf = buf;              /* print in this place */
+	jiq_data.buf = buf;              /* print in this place */
 	jiq_data.jiffies = jiffies;      /* initial time */
 	jiq_data.delay = 0;
 
@@ -205,7 +209,10 @@ static ssize_t jiq_read_wq(struct file *pfile, char __user *buf, size_t len, lof
 	// 将当前进程状态设置为TASK_RUNNING
 	finish_wait(&jiq_wait, &wait);
 
-	return jiq_data.len;
+    //
+    copy_to_user(buf, jiq_data.buf, jiq_data.len);
+
+	return 0; // end read loops 
 }
 
 static ssize_t jiq_read_wq_delayed(struct file *pfile, char __user *buf, size_t len, loff_t *poff)
@@ -214,7 +221,7 @@ static ssize_t jiq_read_wq_delayed(struct file *pfile, char __user *buf, size_t 
 	DEFINE_WAIT(wait);
 	
 	jiq_data.len = 0;                /* nothing printed, yet */
-	jiq_data.ubuf = buf;              /* print in this place */
+	jiq_data.buf = buf;              /* print in this place */
 	jiq_data.jiffies = jiffies;      /* initial time */
 	jiq_data.delay = delay;
     
@@ -240,7 +247,7 @@ static ssize_t jiq_read_tasklet(struct file *pfile, char __user *buf, size_t len
     DEFINE_WAIT(wait);
 
 	jiq_data.len = 0;                /* nothing printed, yet */
-	jiq_data.ubuf = buf;              /* print in this place */
+	jiq_data.buf = buf;              /* print in this place */
 	jiq_data.jiffies = jiffies;      /* initial time */
 
 	tasklet_schedule(&jiq_tasklet);
@@ -268,7 +275,7 @@ static ssize_t jiq_read_run_timer(struct file *pfile, char __user *buf, size_t l
 {
 
 	jiq_data.len = 0;           /* prepare the argument for jiq_print() */
-	jiq_data.ubuf = buf;
+	jiq_data.buf = buf;
 	jiq_data.jiffies = jiffies;
 
 	init_timer(&jiq_timer);              /* init the timer structure */
@@ -317,18 +324,19 @@ struct file_operations proc_jiq_timeout =
 static int jiq_init(void)
 {
 
+    printk(KERN_ALERT "jiq_init\n");
 	/* 初始化一个任务 */
 	INIT_WORK(&jiq_work, jiq_print_wq);
-    INIT_DELAYED_WORK(&jiq_delay_work, jiq_print_wq);
+    //INIT_DELAYED_WORK(&jiq_delay_work, jiq_print_wq);
 
 	/*
 	 * struct proc_dir_entry *proc_create(const char *name, umode_t mode, 
 	 *                                    struct proc_dir_entry *parent, const struct file_operations *proc_fops)
 	 */
 	proc_create("jiqwq", 0, NULL, &proc_jiq_wq);
-	proc_create("jiqwqdelay", 0, NULL, &proc_jiq_wq_delay);
-	proc_create("jiqtimer", 0, NULL, &proc_jiq_timeout);
-	proc_create("jiqtasklet", 0, NULL, &proc_jiq_tasklet);
+	//proc_create("jiqwqdelay", 0, NULL, &proc_jiq_wq_delay);
+	//proc_create("jiqtimer", 0, NULL, &proc_jiq_timeout);
+	//proc_create("jiqtasklet", 0, NULL, &proc_jiq_tasklet);
     /*
      * create_proc_read_entry() is deprecated
      */
@@ -343,11 +351,11 @@ static int jiq_init(void)
 static void jiq_cleanup(void)
 {
 	remove_proc_entry("jiqwq", NULL);
-	remove_proc_entry("jiqwqdelay", NULL);
-	remove_proc_entry("jitimer", NULL);
-	remove_proc_entry("jiqtasklet", NULL);
+	//remove_proc_entry("jiqwqdelay", NULL);
+	//remove_proc_entry("jitimer", NULL);
+	//remove_proc_entry("jiqtasklet", NULL);
+    printk(KERN_ALERT "jiq_cleanup\n");
 }
-
 
 module_init(jiq_init);
 module_exit(jiq_cleanup);

@@ -1,4 +1,4 @@
-obj-m := hello.o
+obj-m := jit.o
 
 PWD := $(shell pwd)
 KVERSION := $(shell uname -r)

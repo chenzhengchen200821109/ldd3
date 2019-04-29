@@ -8,4 +8,4 @@ module:
 	$(MAKE) -C $(KDIRECTORY) M=$(PWD)
 
 clean:
-	rm *.o *.ko *.mod.c modules.order Module.symvers
+	rm  -r *.o *.ko *.mod.c modules.order Module.symvers .*.swp .*.cmd .tmp_versions

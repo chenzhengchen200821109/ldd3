@@ -25,6 +25,7 @@
 static void data_cleanup(void)
 {
 	/* never called */
+    printk(KERN_ALERT "should never happend\n");
 }
 
 int data_init(void)
